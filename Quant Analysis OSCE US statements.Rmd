@@ -1,0 +1,377 @@
+---
+title: Has US Diplomatic Discourse Changed? An Analysis of Trump vs. Biden OSCE
+  Statements
+author: "Alin Ierima"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# 1. Introduction
+
+This paper investigates whether US diplomatic discourse has changed between the Trump and Biden administrations by comparing OSCE statements. Using quantitative text analysis, we extract features via bag of words, TFIDF, and bigram representations, then employ supervised classification (Naive Bayes) to test if the speeches are distinguishable.
+
+---
+
+In a [final paper for another class (link)](https://github.com/ierimalin/Discourse-Analysis/blob/main/Leadership%20change%20and%20diplomatic%20discourse_%20a%20critical%20analysis%20of%20%20%20US%20statements%20at%20the%20OSCE.pdf), I have explored the implications of the US administration change to its foreign policy, by engaging with the diplomatic statements from the weekly Permanent Council meetings. By using discourse analysis methodologies, the paper revealed a significant rhetorical shift from a moralised, value-based framing of the war to a procedural, depersonalised, and strategically neutral tone following Trump's return to office. 
+
+In the present paper, I extend this analysis by applying quantitative text analysis methodologies to corroborate the qualitative findings and to increase the sample size (from 6 texts to 24). I expect, and hypothesise, that texts released after the cutoff point of January 20 will exhibit a distinguishable difference in word usage compared to earlier statements.
+
+Given the final paper requirements focus on the analysis part, the rest of the introduction will discuss methodology. In order to compare the statements between the two periods in an "apples to apples" way, I decided to only pick the US statements at the OSCE Permanent Council under the agenda ”The Russian Federation's ongoing aggression against Ukraine", which became a recurrent feature of the meetings after the full-scale invasion started. Since only twelve such statements have been released under the Trump administration, the same number has been picked for the Biden statements so as to have a balanced dataset from the very beginning. For Biden, the statements range from 19th September to 19th December 2024, and for Trump, from 23rd January to 10th April 2025.
+
+```{r data collecting, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse) 
+library(pdftools)
+library(stringr)
+library(quanteda)
+library(quanteda.textmodels)
+library(caret)
+library(e1071)
+library(patchwork)
+
+trumppdf <- "data/Trump"
+bidenpdf  <- "data/Biden"
+
+extract_pdf_text <- function(pdf) {
+  paste(pdf_text(pdf), collapse = "\n")
+} #The documents are pdf's
+
+trump_files <- dir(path = trumppdf, pattern = "\\.pdf$", full.names = TRUE)
+trump_data <- tibble(
+  file = basename(trump_files),
+  text = map_chr(trump_files, extract_pdf_text),
+  era = "Trump"
+) #This creates a clear era differentiation from the very beginning.
+
+biden_files <- dir(path = bidenpdf, pattern = "\\.pdf$", full.names = TRUE)
+biden_data <- tibble(
+  file = basename(biden_files),
+  text = map_chr(biden_files, extract_pdf_text),
+  era = "Biden"
+)
+
+all_data <- bind_rows(trump_data, biden_data)
+
+```
+
+There have been a couple of challenges to overcome in terms of data availability. For example, statements are no longer made public on the US Mission's website after the Trump inauguration. Additionally, the automatic scraping of Biden statements from the website has been unsuccessful due to the anti-bot measures of the website. Therefore, all statements have been manually collected from the OSCE internal system. 
+
+The analysis will proceed as follows. First, a descriptive analysis will be made with the use of three text representation techniques. Bag of words, or word frequency, will be used to provide a general overview of the most commonly used words across the documents; a visual representation will also facilitate this part. Frequency-inverse document frequency, or TFIDF, will take a similar approach to bag of words, yet focus on words that are distinctive across the two eras (Biden and Trump), weighting them as more important the less common they are. Lastly, a bigram representation will focus on collocations, or sequences of two consecutive words, which should enhance the analysis by offering an insight into contextual and rhetorical patterns that are recurrent in the statements. Taken together, these three feature representations provide a good image on whether there is a significant difference between the two eras, as hypothesised.
+
+The second part of the analysis will take these feature representations and use supervised classifications (Naive Bayes) to train a model on half of the sample to distinguish between the texts from the two administrations on the other half. The objective here is to see whether these models can distinguish between the two types of texts, and if so, which feature representation is the most effective. For robustness reasons, a 10-fold cross-validation will be undertaken, which evaluates the overall classification performance with metrics such as accuracy, precision, recall and F1 score.
+
+# 2. Data Cleaning, preprocessing
+
+In the data cleaning phase, raw text extracted from the PDF documents was prepared for the preprocessing by removing elements that do not bring any value to the analysis such as boilerplate sections, excessive whitespace and possessive markers ('s). After cleaning, the data was transformed into a corpus to prepare for the subsequent transformations.
+
+
+```{r data cleaning, echo = FALSE, message=FALSE, warning=FALSE}
+clean_text_by_era <- function(text, era) {
+  text <- str_replace_all(text, "\n", " ") #Removing the new line characters
+  cutoff <- ifelse(tolower(era) == "biden", "2024", "2025") #This part is important for removing some text that repeats itself in both Biden & Trump files at the very beginning. 
+  pattern_delivery <- paste0("(?i)As delivered by[\\s\\S]*?(", cutoff, ")") 
+  text <- str_replace_all(text, regex(pattern_delivery, dotall = TRUE), "\\1") #From here below: removing phrases that do not represent the text of the statement. Due to pdf weirdness, expressions such as //s were included to correctly match whitespace.
+  text <- str_remove_all(text, regex("The\\s+Russian\\s+Federation’s\\s+Ongoing\\s+Aggression\\s+Against\\s+Ukraine",dotall = TRUE))
+  text <- str_remove_all(text, regex("United\\s+States\\s+Mission\\s+to\\s+the\\s+OSCE",dotall = TRUE))
+  text <- str_remove_all(text, regex("The\\s+OSCE\\s+Secretariat\\s+bears\\s+no\\s+responsibility[\\s\\S]*?Original:\\s*ENGLISH", dotall = TRUE))
+  text <- str_remove_all(text, regex("Wagramerstr\\.\\s*17-19,\\s*1220\\s*Vienna,\\s*Austria[\\s\\S]*?http://osce\\.usmission\\.gov", dotall = TRUE))
+text <- str_remove_all(text, regex("Response\\s+to\\s+the\\s+Opening\\s+Address\\s+by\\s+the\\s+Chairperson-in-Office\\s+and\\s+Minister\\s+for\\s+Foreign\\s+Affairs\\s+of\\s+Finland\\s+Elina\\s+Valtonen\\s+2025", ignore_case = TRUE))
+  text <- str_remove_all(text, regex("Page\\s+\\d+\\s+of\\s+\\d+", ignore_case = TRUE))
+  text <- str_remove_all(text, regex("(_|-){10,}", ignore_case = TRUE))
+  str_squish(text) #Removing extra spaces
+}
+
+all_data <- all_data |>
+  rowwise() |>
+  mutate(cleaned_text = clean_text_by_era(text, era)) |>
+  mutate(cleaned_text = gsub("’s", "", cleaned_text, fixed = TRUE)) #one last command to clean up 's 
+
+
+corpus_all <- corpus(all_data, text_field = "cleaned_text", docid_field = "file") #creating a corpus
+
+```
+
+Subsequently, in the preprocessing step, the corpus was tokenised to convert the text into individual words and to remove punctuation. Finally, word stemming was applied to reduce each word to its base form.
+
+```{r data preprocessing, echo = FALSE, message=FALSE, warning=FALSE}
+#Tokenising the corpus, lowercasing the words, removing stopwords, removing empty strings and stemming the words
+tokens_all <- corpus_all |>
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) |>
+  tokens_tolower() |>
+  tokens_remove(stopwords("english")) |>
+  tokens_replace(pattern = "’", replacement = "", valuetype = "fixed") |>
+  tokens_remove(pattern = "^$", valuetype = "regex")|>
+  tokens_wordstem()
+```
+
+# 3. Descriptive analysis
+
+To begin, I created a Document-Feature Matrix (DFM) from the tokenised corpus, which represents each document as a row and each unique word as a column. Then, the resulted matrix is used to identify the most occuring words in the dataset. 
+
+```{r DFM creation,echo = FALSE, message=FALSE, warning=FALSE}
+dfm_all <- dfm(tokens_all) |>
+  dfm_trim(min_termfreq = 5) #Making sure to capture only the terms that appeared at least 5 times
+dfm_by_era <- dfm_group(dfm_all, groups = all_data$era)
+top_features <- topfeatures(dfm_all, 10)
+top_features_biden <- topfeatures(dfm_by_era["Biden", ], n = 10)
+top_features_trump <- topfeatures(dfm_by_era["Trump", ], n = 10)
+
+top_features_combined <- data.frame(
+  Overall_words = names(top_features),
+  Overall_freq = as.numeric(top_features),
+  Biden_words = names(top_features_biden),
+  Biden_freq = as.numeric(top_features_biden),
+  Trump_words = names(top_features_trump),
+  Trump_freq = as.numeric(top_features_trump)
+)
+knitr::kable(top_features_combined, caption = "Top 10 word frequency")
+```
+Next, I extracted the top 10 overall frequent words from the entire corpus and also disaggregated the frequencies by eras. Table 1 shows that terms such as "russia", "ukrain" and "war" are popular across the eras, yet the Trump statements tend to have lower frequencies despite similar word counts - confirming one of the conclusions from the previous study that mentioning the two countries tends to be avoided overall. A visual representation of the difference between the two eras was created through word cloud visualisations (first is Biden-era, followed by Trump-era documents).
+
+```{r Wordcloud bow Biden,echo = FALSE, message=FALSE, warning=FALSE}
+library(quanteda.textplots)
+dfm_by_era <- dfm_group(dfm_all, groups = all_data$era) #aggregates the dfm based on Trump/Biden split
+set.seed(123)
+textplot_wordcloud(dfm_by_era["Biden", ],color = rev(RColorBrewer::brewer.pal(8, "Dark2")), min_count = 5)
+```
+The Trump-era wordcloud below shows a clear reduction of overall usage of words, or a clearer concentration on specific ones. Additionally, it outlines a clear focus on negotiating an end to the war, rather than using words that evoke an emotional response (such as Biden's "crime", "right", "aggress", among others).
+```{r Wordcloud bow Trump,echo = FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+textplot_wordcloud(dfm_by_era["Trump", ],color = rev(RColorBrewer::brewer.pal(8, "Dark2")), min_count = 5)
+```
+
+Next, I look at TFIDF, which weights words based on their inverse frequency. As expected, words such as "dprk", "justic", "iran", "human" and "crime" are more proeminent with Biden, as the statements tend to reflect a critical attitude towards the Russian actions and their collaborating allies. In contrast, Trump's statements feature "negoti", "ceasefir", "must", "presid", "achieve", which all strongly suggest a rhetorical focus that emphasises outcomes, leadership and a negotiation-oriented stance. 
+
+
+
+
+```{r TFIDF,echo = FALSE, message=FALSE, warning=FALSE}
+dfm_tfidf_all <- dfm_all |> 
+  dfm_trim(min_termfreq = 1) |> 
+  dfm_tfidf() 
+
+dfm_tfidf_by_era <- dfm_tfidf_all |>
+  dfm_group(groups = all_data$era, force = TRUE)
+
+top_features_biden_tfidf <- topfeatures(dfm_tfidf_by_era["Biden", ], n = 10) 
+top_features_trump_tfidf <- topfeatures(dfm_tfidf_by_era["Trump", ], n = 10)
+
+top_features_combined_tfidf <- data.frame(
+  Biden_words = names(top_features_biden_tfidf),
+  Biden_weighted_freq = as.numeric(top_features_biden_tfidf),
+  Trump_words = names(top_features_trump_tfidf),
+  Trump_weighted_freq = as.numeric(top_features_trump_tfidf)
+)
+
+knitr::kable(top_features_combined_tfidf, caption = "Table 2: Top 10 TFIDF statements features")
+```
+
+In order to capture common pairings of words that may convey some deeper contextual meanings, I generated bigram tokens from the preprocessed text, which I then used to create a DFM that is dissagregated by administration. As shown in table 3, collocations such as "final act" - referring to the Helsinki Final Act, and "human right", outline the US' moralised approach during the Biden administration. During Trump however, the constructions in the statements primarily drew their legitimacy from peace as an ultimate objective ("war must", "end war"), under the helm of Donald Trump ("presid trump"). 
+
+```{r Bigrams,echo = FALSE, message=FALSE, warning=FALSE}
+# Generate bigram tokens
+tokens_ngrams <- tokens_ngrams(tokens_all, n = 2)
+
+# Create a DFM for bigrams and trim low-frequency bigrams
+dfm_bigram_all <- dfm(tokens_ngrams) |> dfm_trim(min_termfreq = 5)
+dfm_bigram_by_era <- dfm_bigram_all |> dfm_group(groups = all_data$era)
+
+# Display the top 10 most frequent bigrams
+top_bigrams <- topfeatures(dfm_bigram_all, 10)
+top_bigrams_trump <- topfeatures(dfm_bigram_by_era["Trump", ], n = 10)
+top_bigrams_biden <- topfeatures(dfm_bigram_by_era["Biden", ], n = 10)
+top_features_combined_bigrams <- data.frame(
+  Biden_words = names(top_bigrams_biden),
+  Biden_freq = as.numeric(top_bigrams_biden),
+  Trump_words = names(top_bigrams_trump),
+  Trump_freq = as.numeric(top_bigrams_trump)
+)
+
+knitr::kable(top_features_combined_bigrams, caption = "Table 3: Top 10 bigram features")
+```
+
+```{r wordcloud bigrams Biden,echo = FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+textplot_wordcloud(dfm_bigram_by_era["Biden", ], min_count = 4, color = rev(RColorBrewer::brewer.pal(10, "Dark2"))) 
+```
+
+The wordclouds further outline the stylistic and thematic differences between Biden-era and Trump-era diplomatic discourse. Most strikingly, collocation "presid trump" becomes central, despite the fact the diplomatic statement genre is usually more detached and avoids naming specific actors. 
+
+```{r wordcloud bigrams Trump,echo = FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+textplot_wordcloud(dfm_bigram_by_era["Trump", ], min_count = 4, max_words = 50, color = rev(RColorBrewer::brewer.pal(10, "Dark2")))
+
+```
+
+# 4. Supervised machine learning
+
+Having explored the raw and weighted token distributions, now I turn to a formal test of the core question: can a simple classifier tell Trump-era  from Biden-era statements based on word usage only? To do this, we use our three representations already computed (bag of words, TFIDF, bigrams) earlier. With only 24 total documents, I maximise the training data by splitting the corpus evenly, in 50% for training and 50% for testing. Additionally, I preserve the Trump/Biden ratio in each set to still be 50/50, so that the model will train on an equal number of era-statements. 
+
+I then fit a Naive bayes multinomial model on the training half. For the confusion matrix, I treat Trump as the "positive" class, because my focus is on detecting the new administration's rhetorical shift. I do the exact same thing for all three representations. 
+```{r ml setup, echo = FALSE, message=FALSE, warning=FALSE}
+#managing the DFM creation and splitting all at once, upfront
+
+dfm_bow <- dfm(tokens_all) |> dfm_trim(min_termfreq = 5)
+dfm_tfidf_all <- dfm(tokens_all) |> dfm_trim(min_termfreq = 4) |> dfm_tfidf()
+dfm_bi_all <- tokens_ngrams(tokens_all, 2) |> dfm() |> dfm_trim(min_docfreq = 2)
+
+docvars(dfm_bow,"era") <- all_data$era
+docvars(dfm_tfidf_all,"era") <- all_data$era
+docvars(dfm_bi_all, "era") <- all_data$era
+
+set.seed(123)
+n <- ndoc(dfm_all)
+id_train <- sample(n, floor(0.5 * n))
+id_test  <- setdiff(1:n, id_train)
+```
+
+
+```{r training,echo = FALSE, message=FALSE, warning=FALSE}
+#Since we're doing the same thing three times, making a function to minimise code:
+modeltemplate <- function(id_train, id_test) {
+  model <- textmodel_nb(id_train, docvars(id_train, "era"), prior = "docfreq")
+  pred <- predict(model, newdata = id_test)
+  confusionMatrix(
+    factor(pred, levels = c("Biden", "Trump")),
+    factor(docvars(id_test, "era"), levels = c("Biden", "Trump")),
+    positive = "Trump"
+  )
+}
+
+cm_bow <- modeltemplate(dfm_bow[id_train, ], dfm_bow[id_test, ])
+cm_tfidf  <- modeltemplate(dfm_tfidf_all[id_train, ], dfm_tfidf_all[id_test, ])
+cm_bigram <- modeltemplate(dfm_bi_all[id_train, ], dfm_bi_all[id_test, ])
+```
+
+
+On the hold‑out set,I continue by extracting four key metrics which are used to evaluate the models (accuracy, precision, recall, F1).As can be seen below, bag of words and TFIDF performed identically across all metrics, while bigrams outperformed both by achieving the highest accuracy (0.9) and perfect (1) precision. This is expected, as collocations such as "presid trump" and "cease fire" are exclusively used in the Trump-era documents.
+
+```{r eval metrics,echo = FALSE, message=FALSE, warning=FALSE}
+extract_metrics <- function(cm){
+  Accuracy <- round(cm$overall["Accuracy"],3)
+  Precision <- round(cm$byClass["Pos Pred Value"],3)
+  Recall <- round(cm$byClass["Sensitivity"],3)
+  F1 <- round(2*(Precision*Recall)/(Precision+Recall),3)
+  data.frame(Accuracy,Precision,Recall,F1)}
+
+metrics_combined <- bind_rows(
+  Bag_of_Words = extract_metrics(cm_bow),
+  TF_IDF = extract_metrics(cm_tfidf),
+  Bigrams = extract_metrics(cm_bigram))
+
+knitr::kable(metrics_combined,caption="Evaluation Metrics by Feature Representation",row.names=FALSE)
+
+```
+
+Despite the very similar performance metrics observed across the three models (BoW, TFIDF, and bigrams), these results do not indicate that the representations were redundant. The convergence in scores instead points to the stability of class distinctions in the dataset: a number of discriminative tokens (such as "Trump" "ceasefire" or "human", for example) appear to be strong enough to drive model predictions regardless of representation. To confirm that the representations were not identical and that the models were trained on different feature spaces I checked the actual features that were used:
+```{r}
+identical(featnames(dfm_bow), featnames(dfm_tfidf_all))
+identical(featnames(dfm_bow), featnames(dfm_bi_all))
+```
+
+# 5. Cross validation
+
+To check the stability of the Naive Bayes classifiers, I performed a 10-fold cross-validation on each feature representation, using Laplace smoothing and stratified folds. In each fold, 90% of the statements serve as training data and 10% as test data. Then, the average across all ten folds is calculated.
+
+```{r crossvalidation bow,echo = FALSE, message=FALSE, warning=FALSE,results='hide'}
+docvars(dfm_all, "era") <- all_data$era
+dfm_mat <- as.matrix(dfm_all)
+dfm_df <- as.data.frame(dfm_mat)
+dfm_df$era <- factor(docvars(dfm_all, "era"))
+set.seed(123)
+folds <- createFolds(dfm_df$era, k = 10, list = TRUE)
+acc_values <- numeric(length(folds))
+for (i in seq_along(folds)) {
+  test_idx <- folds[[i]] #selects one of the folds (1 in 10 -> 10%)
+  train_idx <- setdiff(seq_len(nrow(dfm_df)), test_idx) #takes the rest (90%)
+  train_data <- dfm_df[train_idx, ]
+  test_data <- dfm_df[test_idx, ]
+  nb_model <- naiveBayes(era ~ ., data = train_data, laplace = 1)
+  predictions <- predict(nb_model, newdata = test_data)
+  cm <- confusionMatrix(predictions, test_data$era)
+  acc_values[i] <- cm$overall["Accuracy"]
+  cat("Fold", i, "Accuracy:", round(cm$overall["Accuracy"], 3))
+  print(cm$table)}
+
+mean_accuracy <- mean(acc_values)
+```
+
+```{r,echo = FALSE}
+cat("Average 10-fold Cross-Validation Accuracy for bag of words:", round(mean_accuracy, 3), "\n")
+
+```
+As can be seen, the bag of words achieved a 69% accuracy rate - still better than chance, but noticeably lower than the 83% that was present on the 50/50 hold-out split. This drop reflects the small size of the corpus and, therefore, its high variance. More data would have been necessary for improving the performance. TFIDF, as can be seen below, maintains an identical score.
+
+```{r crossvalidation tfidf, echo = FALSE, message=FALSE, warning=FALSE,results='hide' }
+dfm_tfidf <- dfm_tfidf(dfm_all)
+docvars(dfm_tfidf, "era") <- all_data$era
+
+# Convert dfm_tfidf to a matrix and then a data frame
+dfm_tfidf_mat <- as.matrix(dfm_tfidf)
+dfm_tfidf_df <- as.data.frame(dfm_tfidf_mat)
+dfm_tfidf_df$era <- factor(docvars(dfm_tfidf, "era"))
+
+#Create stratified folds on the TFIDF data frame
+set.seed(123)
+folds_tfidf <- createFolds(dfm_tfidf_df$era, k = 10, list = TRUE)
+
+acc_tfidf <- numeric(length(folds_tfidf))
+for (i in seq_along(folds_tfidf)) {
+  test_idx <- folds_tfidf[[i]]
+  train_idx <- setdiff(seq_len(nrow(dfm_tfidf_df)), test_idx)
+  
+  train_data <- dfm_tfidf_df[train_idx, ]
+  test_data  <- dfm_tfidf_df[test_idx, ]
+  
+  nb_model <- naiveBayes(era ~ ., data = train_data, laplace = 1)
+  preds <- predict(nb_model, newdata = test_data)
+  
+  cm <- confusionMatrix(preds, test_data$era)
+  acc_tfidf[i] <- cm$overall["Accuracy"]
+  cat("TFIDF - Fold", i, "Accuracy:", round(cm$overall["Accuracy"], 3), "\n")}
+mean_acc_tfidf <- mean(acc_tfidf)
+```
+```{r, echo=FALSE}
+cat("Average 10-Fold CV Accuracy for TFIDF:", round(mean_acc_tfidf, 3))
+```
+Bigrams confirm their highest achieved performance, as already observed in the Naive Bayes hold-out results. With an average cross-validation accuracy of 75.8%, the bigram model outperforms both the bag of words and TFIDF representations. This might be due to collocational patterns that only emerge in certain eras - such as "presid trump" during the Trump era or "dprk soldier" in the Biden era.
+```{r crossvalidation bigram, echo = FALSE, message=FALSE, warning=FALSE,results='hide'}
+docvars(dfm_bigram_all, "era") <- all_data$era
+
+# Convert dfm_bigram to a matrix and then a data frame
+dfm_bigram_mat <- as.matrix(dfm_bigram_all)
+dfm_bigram_df <- as.data.frame(dfm_bigram_mat)
+dfm_bigram_df$era <- factor(docvars(dfm_bigram_all, "era"))
+
+# Create stratified folds on the bigram data frame
+set.seed(123)
+folds_bigram <- createFolds(dfm_bigram_df$era, k = 10, list = TRUE)
+
+acc_bigram <- numeric(length(folds_bigram))
+for (i in seq_along(folds_bigram)) {
+  test_idx <- folds_bigram[[i]]
+  train_idx <- setdiff(seq_len(nrow(dfm_bigram_df)), test_idx)
+  
+  train_data <- dfm_bigram_df[train_idx, ]
+  test_data  <- dfm_bigram_df[test_idx, ]
+  
+  nb_model <- naiveBayes(era ~ ., data = train_data, laplace = 1)
+  preds <- predict(nb_model, newdata = test_data)
+  
+  cm <- confusionMatrix(preds, test_data$era)
+  acc_bigram[i] <- cm$overall["Accuracy"]
+  cat("Bigram - Fold", i, "Accuracy:", round(cm$overall["Accuracy"], 3), "\n")
+}
+mean_acc_bigram <- mean(acc_bigram)
+```
+```{r, echo=FALSE}
+cat("Average 10-Fold CV Accuracy for Bigram:", round(mean_acc_bigram, 3))
+```
+# 6. Instead of conclusion: discussion
+
+The descriptive analysis confirms clear lexical and stylistic differences between the Biden and Trump administrations. As shown in the word frequency tables and wordclouds, Biden-era statements rely more heavily on moralised and rights-based vocabulary, such as "crime", "justic", "human", and "iran". These reflect a value-driven framing of international relations, particularly in response to the war in Ukraine. In contrast, Trump-era texts prioritise terms like "ceasefir", "must", "negoti", and "achieve", suggesting a more transactional, goal-oriented approach. This contrast is further reinforced by the bigram analysis, where collocations such as "presid trump" and "end war" dominate the Trump discourse, while phrases like "final act", "human right", and "support ukrain" are more prominent in the Biden texts.
+
+The second part of the analysis showed that, across all three feature representations, the Naive Bayes classifier was able to distinguish between the two eras with relatively high accuracy. Bigrams outperformed both the bag of words and TF IDF models, reaching 90% accuracy compared to 83% for the others. A K-Fold validation, however, decreased that to a 75% accuracy, compared to 69% for the others. The fact that the two unigram-based models performed identically, despite using different weighting schemes and vocabularies, suggests that a small set of highly discriminative words, such as related to values, leadership and military actions, play an important role in separating the two periods, essentially functioning as shortcuts that consistently signal the administration behind each statement. This was expected.
+
+There are, however, important limitations to the analysis. The dataset remains small, consisting of only 24 documents, which limits the robustness of the supervised classification results. While cross-validation helped mitigate this by testing model performance across multiple splits, results are bound to vary with the addition of new statements. Despite that, the existing analysis lends further credibility to the conclusions of my previous qualitative paper on this topic.
